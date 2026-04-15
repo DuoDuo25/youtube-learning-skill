@@ -1,0 +1,4 @@
+httpx
+lark-oapi
+google-genai
+python-dotenv

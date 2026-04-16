@@ -222,7 +222,7 @@ youtube-learning-skill/
 
 不想自己搭？加入飞书群，直接看 AI 生成的学习笔记：
 
-[点击加入飞书群「嗨妮好」](https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=4d7q8aa5-bcfe-4d27-8b9a-d88943da3396)
+[点击加入飞书群「嗨妮好 · 学习笔记站」](https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=4d7q8aa5-bcfe-4d27-8b9a-d88943da3396)
 
 ## License
 

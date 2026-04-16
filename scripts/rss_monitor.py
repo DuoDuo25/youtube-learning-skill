@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-YouTube RSS 监控
+YouTube 视频监控
 
 定时检查订阅频道的新视频，通过 lark-cli 发送飞书交互卡片通知。
+使用 YouTube Data API v3 的 playlistItems 接口获取频道最新视频。
 
 用法：
   python scripts/rss_monitor.py check [--hours 24] [--dry-run]
@@ -15,7 +16,6 @@ import logging
 import os
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -73,67 +73,100 @@ def save_channels(config: dict):
         json.dump(config, f, indent=2, ensure_ascii=False, default=str)
 
 
-# ==================== RSS 解析 ====================
+# ==================== YouTube Data API ====================
+
+def _get_youtube_access_token() -> str | None:
+    """获取 YouTube API access token（通过 refresh token）"""
+    tokens_file = DATA_DIR / "youtube_tokens.json"
+    if not tokens_file.exists():
+        return None
+
+    client_id = os.getenv("YOUTUBE_CLIENT_ID")
+    client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return None
+
+    tokens = json.loads(tokens_file.read_text())
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        return None
+
+    try:
+        resp = httpx.post("https://oauth2.googleapis.com/token", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token"
+        }, timeout=15)
+        return resp.json().get("access_token")
+    except Exception as e:
+        logger.error(f"获取 YouTube access token 失败: {e}")
+        return None
+
 
 def fetch_channel_videos(channel_id: str, channel_name: str = "") -> list[Video]:
-    """从频道 RSS feed 获取最近视频"""
-    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    logger.info(f"Fetching RSS: {rss_url}")
+    """通过 YouTube Data API 获取频道最新视频
+
+    使用 playlistItems 接口查询频道的 uploads playlist。
+    uploads playlist ID = 'UU' + channel_id[2:]（将 UC 前缀替换为 UU）
+    """
+    access_token = _get_youtube_access_token()
+    if not access_token:
+        logger.error(f"无法获取 YouTube access token，跳过频道 {channel_name or channel_id}")
+        return []
+
+    # Channel ID 以 UC 开头，uploads playlist ID 以 UU 开头
+    uploads_playlist_id = "UU" + channel_id[2:]
 
     try:
-        resp = httpx.get(rss_url, timeout=30)
+        resp = httpx.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={
+                "part": "snippet",
+                "playlistId": uploads_playlist_id,
+                "maxResults": "10",
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
         resp.raise_for_status()
     except Exception as e:
-        logger.error(f"RSS 获取失败 ({channel_id}): {e}")
+        logger.error(f"YouTube API 请求失败 ({channel_name or channel_id}): {e}")
         return []
 
-    try:
-        root = ET.fromstring(resp.content)
-        ns = {
-            'atom': 'http://www.w3.org/2005/Atom',
-            'yt': 'http://www.youtube.com/xml/schemas/2015',
-            'media': 'http://search.yahoo.com/mrss/'
-        }
+    data = resp.json()
+    videos = []
 
-        videos = []
-        for entry in root.findall('atom:entry', ns):
-            video_id = entry.find('yt:videoId', ns)
-            title = entry.find('atom:title', ns)
-            published = entry.find('atom:published', ns)
-            author = entry.find('atom:author/atom:name', ns)
+    for item in data.get("items", []):
+        snippet = item.get("snippet", {})
+        video_id = snippet.get("resourceId", {}).get("videoId")
+        title = snippet.get("title", "")
+        published_str = snippet.get("publishedAt", "")
+        description = snippet.get("description", "")
+        thumbnails = snippet.get("thumbnails", {})
+        thumbnail = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url", "")
 
-            media_group = entry.find('media:group', ns)
-            thumbnail = ""
-            description = ""
-            if media_group is not None:
-                thumb_elem = media_group.find('media:thumbnail', ns)
-                if thumb_elem is not None:
-                    thumbnail = thumb_elem.get('url', '')
-                desc_elem = media_group.find('media:description', ns)
-                if desc_elem is not None and desc_elem.text:
-                    description = desc_elem.text
+        if not video_id or not title:
+            continue
 
-            if video_id is not None and title is not None:
-                vid = Video(
-                    video_id=video_id.text,
-                    title=title.text,
-                    channel_name=author.text if author is not None else channel_name,
-                    channel_id=channel_id,
-                    published=datetime.fromisoformat(
-                        published.text.replace('Z', '+00:00')
-                    ) if published is not None else datetime.now(),
-                    url=f"https://www.youtube.com/watch?v={video_id.text}",
-                    thumbnail=thumbnail,
-                    description=description
-                )
-                videos.append(vid)
+        try:
+            published = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            published = datetime.now().astimezone()
 
-        logger.info(f"Found {len(videos)} videos from {channel_name or channel_id}")
-        return videos
+        videos.append(Video(
+            video_id=video_id,
+            title=title,
+            channel_name=snippet.get("channelTitle", channel_name),
+            channel_id=channel_id,
+            published=published,
+            url=f"https://www.youtube.com/watch?v={video_id}",
+            thumbnail=thumbnail,
+            description=description,
+        ))
 
-    except Exception as e:
-        logger.error(f"RSS 解析失败 ({channel_id}): {e}")
-        return []
+    logger.info(f"Found {len(videos)} videos from {channel_name or channel_id}")
+    return videos
 
 
 # ==================== yt-dlp ====================

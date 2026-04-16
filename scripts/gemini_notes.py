@@ -51,8 +51,8 @@ def init_client() -> genai.Client:
 
 def load_prompts() -> tuple[str, str]:
     """读取用户背景和输出格式配置"""
-    user_profile_path = PROJECT_DIR / "config" / "user_profile.md"
-    output_format_path = PROJECT_DIR / "config" / "output_format.md"
+    user_profile_path = PROJECT_DIR / "references" / "user_profile.md"
+    output_format_path = PROJECT_DIR / "references" / "output_format.md"
 
     user_profile = user_profile_path.read_text(encoding='utf-8') if user_profile_path.exists() else ""
     output_format = output_format_path.read_text(encoding='utf-8') if output_format_path.exists() else ""

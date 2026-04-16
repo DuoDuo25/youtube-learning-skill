@@ -96,65 +96,78 @@ def init_client() -> genai.Client:
     if not api_key:
         print("错误: 请在 .env 中配置 GEMINI_API_KEY")
         sys.exit(1)
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=600000),  # 10 分钟
+    )
 
 
 def generate_image_from_prompt(
-    client: genai.Client, prompt: str, output_path: Path, filename: str
+    client: genai.Client, prompt: str, output_path: Path, filename: str,
+    max_retries: int = 2
 ) -> str | None:
     """用图片生成模型生成单张知识图卡"""
-    try:
-        full_prompt = IMAGE_GEN_PREFIX + prompt
+    import time
 
-        response = client.models.generate_content(
-            model=MODEL_IMAGE_GEN,
-            contents=[full_prompt],
-            config=types.GenerateContentConfig(
-                temperature=0.8,
-                response_modalities=["image", "text"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="16:9",
-                    image_size="2K"
+    full_prompt = IMAGE_GEN_PREFIX + prompt
+
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                logger.info(f"      🔄 重试第 {attempt} 次...")
+                time.sleep(3)
+
+            response = client.models.generate_content(
+                model=MODEL_IMAGE_GEN,
+                contents=[full_prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.8,
+                    response_modalities=["image", "text"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio="16:9",
+                        image_size="2K"
+                    )
                 )
             )
-        )
 
-        if not response.candidates:
-            return None
+            if not response.candidates:
+                logger.warning(f"      ⚠️ 无 candidates 返回")
+                continue
 
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'inline_data') and part.inline_data:
-                image_data = part.inline_data.data
-                mime_type = part.inline_data.mime_type
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    image_data = part.inline_data.data
+                    mime_type = part.inline_data.mime_type
 
-                ext = "png"
-                if "jpeg" in mime_type or "jpg" in mime_type:
-                    ext = "jpg"
-                elif "webp" in mime_type:
-                    ext = "webp"
+                    ext = "png"
+                    if "jpeg" in mime_type or "jpg" in mime_type:
+                        ext = "jpg"
+                    elif "webp" in mime_type:
+                        ext = "webp"
 
-                image_filename = f"{filename}.{ext}"
-                image_path = output_path / image_filename
+                    image_filename = f"{filename}.{ext}"
+                    image_path = output_path / image_filename
 
-                with open(image_path, "wb") as f:
-                    if isinstance(image_data, str):
-                        f.write(base64.b64decode(image_data))
-                    else:
-                        f.write(image_data)
+                    with open(image_path, "wb") as f:
+                        if isinstance(image_data, str):
+                            f.write(base64.b64decode(image_data))
+                        else:
+                            f.write(image_data)
 
-                return str(image_path)
+                    return str(image_path)
 
-        return None
+            logger.warning(f"      ⚠️ 返回中无图片数据")
 
-    except Exception as e:
-        logger.error(f"      ❌ 生成失败: {e}")
-        return None
+        except Exception as e:
+            logger.error(f"      ❌ 生成失败 (attempt {attempt + 1}/{max_retries + 1}): {e}")
+
+    return None
 
 
 def generate_cards_from_prompts(
     card_prompts: dict, output_dir: str
 ) -> list[str]:
-    """从预生成的图卡 prompt 生成图片
+    """从预生成的图卡 prompt 并行生成图片
 
     Args:
         card_prompts: 图卡 prompt 字典（包含 cards 列表）
@@ -163,6 +176,8 @@ def generate_cards_from_prompts(
     Returns:
         list[str]: 生成的图片文件路径列表
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     client = init_client()
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -172,29 +187,40 @@ def generate_cards_from_prompts(
         logger.warning("没有图卡 prompt，跳过生成")
         return []
 
-    logger.info(f"🎨 开始生成 {len(cards)} 张知识图卡...")
-    generated_images = []
+    logger.info(f"🎨 开始并行生成 {len(cards)} 张知识图卡...")
 
-    for i, card in enumerate(cards, 1):
+    def _gen_one(i: int, card: dict) -> tuple[int, str | None]:
         card_name = card.get("name", f"card_{i}")
         card_title = card.get("title", f"图卡 {i}")
         card_prompt = card.get("prompt", "")
 
-        logger.info(f"   [{i}/{len(cards)}] {card_title}...")
-
         if not card_prompt:
-            logger.warning(f"      ⚠️ 没有 prompt，跳过")
-            continue
+            logger.warning(f"   [{i}/{len(cards)}] ⚠️ 没有 prompt，跳过")
+            return i, None
 
+        logger.info(f"   [{i}/{len(cards)}] {card_title}...")
         filename = f"knowledge_card_{i}_{card_name}"
         image_path = generate_image_from_prompt(client, card_prompt, output_path, filename)
 
         if image_path:
-            logger.info(f"      ✅ 保存: {os.path.basename(image_path)}")
-            generated_images.append(image_path)
+            logger.info(f"   [{i}/{len(cards)}] ✅ 保存: {os.path.basename(image_path)}")
         else:
-            logger.warning(f"      ⚠️ 生成失败")
+            logger.warning(f"   [{i}/{len(cards)}] ⚠️ 生成失败")
+        return i, image_path
 
+    results: dict[int, str | None] = {}
+    with ThreadPoolExecutor(max_workers=len(cards)) as executor:
+        futures = {
+            executor.submit(_gen_one, i, card): i
+            for i, card in enumerate(cards, 1)
+        }
+        for future in as_completed(futures):
+            idx, path = future.result()
+            results[idx] = path
+
+    # 按顺序返回成功的图片路径
+    generated_images = [results[i] for i in sorted(results) if results[i]]
+    logger.info(f"   🎨 图卡生成完成: {len(generated_images)}/{len(cards)} 张成功")
     return generated_images
 
 

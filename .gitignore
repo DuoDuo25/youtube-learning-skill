@@ -1,5 +1,6 @@
 # Environment
 .env
+config/user_profile.md
 
 # Runtime data
 data/

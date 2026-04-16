@@ -184,63 +184,80 @@ def insert_images(doc_url: str, image_paths: list[str]) -> int:
     return success_count
 
 
-def build_completion_card(title: str, doc_url: str, video_url: str) -> dict:
+def build_completion_card(
+    title: str, doc_url: str, video_url: str,
+    summary: str = "", channel_name: str = "", video_duration: str = "",
+    published: str = ""
+) -> dict:
     """构建完成通知卡片"""
+    elements = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**{title}**"}
+        },
+    ]
+
+    if summary:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": summary}
+        })
+
+    if channel_name or video_duration or published:
+        fields = []
+        if channel_name:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**频道**\n{channel_name}"}})
+        if video_duration:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**时长**\n{video_duration}"}})
+        if published:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**发布时间**\n{published}"}})
+        elements.append({"tag": "div", "fields": fields})
+
+    elements.append({"tag": "hr"})
+    elements.append({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "📄 查看完整笔记"},
+                "type": "primary",
+                "url": doc_url
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "🔗 查看原视频"},
+                "type": "default",
+                "url": video_url
+            }
+        ]
+    })
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "title": {"tag": "plain_text", "content": "✅ 学习笔记已生成"},
             "template": "green"
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**{title}**"}
-            },
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": "学习笔记和知识图卡已自动生成并保存到飞书文档。"}
-            },
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📄 查看完整笔记"},
-                        "type": "primary",
-                        "url": doc_url
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔗 查看原视频"},
-                        "type": "default",
-                        "url": video_url
-                    }
-                ]
-            }
-        ]
+        "elements": elements
     }
 
 
-def send_notification(chat_id: str, title: str, doc_url: str, video_url: str) -> bool:
-    """发送完成通知卡片
-
-    Args:
-        chat_id: 群聊 ID
-        title: 视频标题
-        doc_url: 飞书文档 URL
-        video_url: YouTube 视频 URL
-
-    Returns:
-        bool: 是否成功
-    """
+def send_notification(
+    chat_id: str, title: str, doc_url: str, video_url: str,
+    summary: str = "", channel_name: str = "", video_duration: str = "",
+    published: str = ""
+) -> bool:
+    """发送完成通知卡片"""
     target_chat = chat_id or FEISHU_CHAT_ID
     if not target_chat:
         logger.warning("未配置 FEISHU_CHAT_ID，跳过通知发送")
         return False
 
-    card = build_completion_card(title, doc_url, video_url)
+    card = build_completion_card(
+        title, doc_url, video_url,
+        summary=summary, channel_name=channel_name,
+        video_duration=video_duration, published=published
+    )
 
     logger.info("📨 发送完成通知...")
     success, stdout, stderr = run_lark_cli([
@@ -264,24 +281,13 @@ def sync_to_feishu(
     title: str,
     video_url: str,
     image_paths: list[str] | None = None,
-    chat_id: str = ""
+    chat_id: str = "",
+    summary: str = "",
+    channel_name: str = "",
+    video_duration: str = "",
+    published: str = ""
 ) -> str | None:
-    """完整的飞书同步流程
-
-    1. 创建飞书文档
-    2. 插入知识图卡图片
-    3. 发送完成通知
-
-    Args:
-        markdown_path: Markdown 笔记文件路径
-        title: 视频标题
-        video_url: YouTube 视频 URL
-        image_paths: 知识图卡图片路径列表
-        chat_id: 群聊 ID（可选，默认用环境变量）
-
-    Returns:
-        str | None: 文档 URL，失败返回 None
-    """
+    """完整的飞书同步流程"""
     logger.info(f"🚀 开始同步到飞书: {title}")
 
     # 1. 创建文档
@@ -297,7 +303,11 @@ def sync_to_feishu(
         logger.info(f"   图片插入完成: {inserted}/{len(image_paths)}")
 
     # 3. 发送通知
-    send_notification(chat_id, title, doc_url, video_url)
+    send_notification(
+        chat_id, title, doc_url, video_url,
+        summary=summary, channel_name=channel_name,
+        video_duration=video_duration, published=published
+    )
 
     logger.info(f"✅ 同步完成: {doc_url}")
     return doc_url
@@ -311,6 +321,9 @@ def main():
     parser.add_argument("--images", nargs="*", help="知识图卡图片路径")
     parser.add_argument("--chat-id", default="", help="飞书群聊 ID")
     parser.add_argument("--folder-token", default="", help="飞书文件夹 token")
+    parser.add_argument("--channel-name", default="", help="YouTube 频道名")
+    parser.add_argument("--video-duration", default="", help="视频时长")
+    parser.add_argument("--published", default="", help="发布时间")
 
     args = parser.parse_args()
 
@@ -327,7 +340,10 @@ def main():
         title=args.title,
         video_url=args.url,
         image_paths=args.images,
-        chat_id=args.chat_id
+        chat_id=args.chat_id,
+        channel_name=args.channel_name,
+        video_duration=args.video_duration,
+        published=args.published
     )
 
     if doc_url:

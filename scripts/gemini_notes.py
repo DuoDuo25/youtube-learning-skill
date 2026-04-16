@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Gemini 学习笔记生成
+Gemini 学习笔记 + 知识图卡 prompt 生成（一次 API 调用）
 
-调用 Gemini API，直接传入 YouTube 视频 URL，生成中文学习笔记。
-Gemini 原生支持读取 YouTube URL，不需要下载字幕。
+调用 Gemini API，直接传入 YouTube 视频 URL，同时生成：
+1. 中文学习笔记（Markdown）
+2. 知识图卡的图片生成 prompt（JSON）
 
 用法：
   python scripts/gemini_notes.py --url <youtube_url> [--output <path>]
 """
 
 import argparse
+import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -26,9 +29,15 @@ except ImportError:
 # Load environment
 load_dotenv()
 
+# Setup logging
+logger = logging.getLogger(__name__)
+
 # Config
 PROJECT_DIR = Path(__file__).parent.parent
 MODEL = "gemini-3.1-pro-preview"
+
+# 分隔符，用于区分笔记和图卡 prompt
+SEPARATOR = "===KNOWLEDGE_CARDS_JSON==="
 
 
 def init_client() -> genai.Client:
@@ -52,25 +61,33 @@ def load_prompts() -> tuple[str, str]:
     return user_profile, output_format
 
 
-def generate_notes(youtube_url: str) -> str:
-    """生成学习笔记
+def generate_notes_and_card_prompts(
+    youtube_url: str, max_cards: int = 5
+) -> tuple[str, dict | None]:
+    """一次 API 调用同时生成学习笔记和知识图卡 prompt
 
     Args:
         youtube_url: YouTube 视频链接
+        max_cards: 最大图卡数量
 
     Returns:
-        str: Markdown 格式的学习笔记
+        (notes_markdown, card_prompts_dict)
+        card_prompts_dict 可能为 None（如果解析失败，笔记仍然可用）
     """
     client = init_client()
     user_profile, output_format = load_prompts()
 
-    prompt = f"""你是一个专业的视频学习助手。请仔细观看这个 YouTube 视频，然后根据以下要求生成中文学习笔记。
+    prompt = f"""你是一个专业的视频学习助手和知识可视化专家。请仔细观看这个 YouTube 视频，然后完成两个任务。
 
 ## 视频信息
 链接: {youtube_url}
 
 ## 用户背景
 {user_profile}
+
+---
+
+# 任务一：生成学习笔记
 
 ## 输出格式要求
 {output_format}
@@ -82,10 +99,58 @@ def generate_notes(youtube_url: str) -> str:
 4. 详细内容部分要保留所有有价值的信息
 5. 直接输出 Markdown 内容，不要用代码块包裹
 6. 链接字段必须使用上面提供的实际 YouTube 链接，不要用占位符
+
+---
+
+# 任务二：生成知识图卡 prompt
+
+在学习笔记之后，请输出分隔符 `{SEPARATOR}`，然后输出知识图卡的 JSON。
+
+## 图卡生成规则
+- 最多生成 {max_cards} 张知识图卡
+- 你需要自主判断这个视频适合生成几张图卡（1-{max_cards} 张）
+- 根据视频内容自主决定每张图卡展示什么内容
+- 不要强行凑数，如果视频内容简单，1-2 张图卡就够了
+- 每张图卡应该有独立的价值，不要重复
+
+## 可选的图卡类型（参考，不必全部使用）
+- 核心概念/架构图：展示关键概念及其关系
+- 工作流程图：展示流程、步骤、数据流
+- 对比分析图：对比不同方案的优劣
+- 功能拆解图：拆解某个系统/产品的功能模块
+- 时间线/演进图：展示发展历程或版本演进
+- 公式/原理图：可视化核心公式或原理
+- 案例示意图：用具体案例说明抽象概念
+
+## 图卡 JSON 格式
+在分隔符 `{SEPARATOR}` 之后，输出以下 JSON（不要用代码块包裹）：
+{{
+  "card_count": 实际生成的图卡数量,
+  "cards": [
+    {{
+      "name": "图卡英文标识（用于文件名）",
+      "title": "图卡中文标题",
+      "type": "图卡类型",
+      "prompt": "详细的图片生成 prompt，包含具体展示内容、视觉布局建议、中文文字标注"
+    }}
+  ]
+}}
+
+---
+
+# 输出格式
+
+先输出完整的学习笔记 Markdown，然后输出分隔符，最后输出图卡 JSON：
+
+[学习笔记 Markdown 内容]
+
+{SEPARATOR}
+
+[图卡 JSON]
 """
 
-    print(f"🎬 正在分析视频: {youtube_url}")
-    print(f"🤖 使用模型: {MODEL}")
+    logger.info(f"🎬 正在分析视频: {youtube_url}")
+    logger.info(f"🤖 使用模型: {MODEL}")
 
     response = client.models.generate_content(
         model=MODEL,
@@ -121,7 +186,42 @@ def generate_notes(youtube_url: str) -> str:
     if text.endswith("```"):
         text = text[:-3].strip()
 
-    return text
+    # 按分隔符拆分笔记和图卡 JSON
+    if SEPARATOR in text:
+        parts = text.split(SEPARATOR, 1)
+        notes_markdown = parts[0].strip()
+        json_text = parts[1].strip()
+
+        # 清理 JSON 文本（去掉可能的代码块包裹）
+        if json_text.startswith("```json"):
+            json_text = json_text[len("```json"):].strip()
+        if json_text.startswith("```"):
+            json_text = json_text[3:].strip()
+        if json_text.endswith("```"):
+            json_text = json_text[:-3].strip()
+
+        # 解析 JSON
+        try:
+            json_start = json_text.find('{')
+            json_end = json_text.rfind('}') + 1
+            if json_start != -1 and json_end > json_start:
+                card_prompts = json.loads(json_text[json_start:json_end])
+                card_count = card_prompts.get("card_count", len(card_prompts.get("cards", [])))
+                logger.info(f"   ✅ 笔记和图卡 prompt 生成完成（{card_count} 张图卡）")
+                return notes_markdown, card_prompts
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"   ⚠️ 图卡 JSON 解析失败: {e}，笔记仍然可用")
+
+        return notes_markdown, None
+    else:
+        logger.warning("   ⚠️ 未找到分隔符，仅返回笔记")
+        return text, None
+
+
+def generate_notes(youtube_url: str) -> str:
+    """兼容旧接口：只返回学习笔记"""
+    notes, _ = generate_notes_and_card_prompts(youtube_url)
+    return notes
 
 
 def main():
@@ -131,18 +231,28 @@ def main():
 
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
     try:
-        notes = generate_notes(args.url)
+        notes, card_prompts = generate_notes_and_card_prompts(args.url)
 
         if args.output:
             output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(notes, encoding='utf-8')
             print(f"\n✅ 笔记已保存: {args.output}")
+
+            if card_prompts:
+                json_path = output_path.parent / "card_prompts.json"
+                json_path.write_text(json.dumps(card_prompts, ensure_ascii=False, indent=2), encoding='utf-8')
+                print(f"✅ 图卡 prompt 已保存: {json_path}")
         else:
             print("\n" + "=" * 60)
             print(notes)
             print("=" * 60)
+            if card_prompts:
+                print("\n📊 图卡 prompt:")
+                print(json.dumps(card_prompts, ensure_ascii=False, indent=2))
 
     except Exception as e:
         print(f"\n❌ 生成失败: {e}")

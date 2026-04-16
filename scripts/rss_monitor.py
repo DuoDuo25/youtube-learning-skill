@@ -266,6 +266,9 @@ def build_video_card(video: Video) -> dict:
                     "action": "start_learning",
                     "video_url": video.url,
                     "video_title": video.title,
+                    "channel_name": video.channel_name,
+                    "video_duration": video.duration,
+                    "published": video.published.strftime('%Y-%m-%d %H:%M'),
                     "chat_id": FEISHU_CHAT_ID
                 }
             },

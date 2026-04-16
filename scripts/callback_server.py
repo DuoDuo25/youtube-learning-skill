@@ -89,35 +89,63 @@ def generate_processing_card(video_title: str) -> dict:
     }
 
 
-def generate_completed_card(video_title: str, doc_url: str, duration: str = "") -> dict:
+def generate_completed_card(
+    video_title: str, doc_url: str, video_url: str = "",
+    summary: str = "", channel_name: str = "", video_duration: str = "",
+    published: str = ""
+) -> dict:
     """生成"已完成"状态卡片"""
+    elements = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**{video_title}**"}
+        },
+    ]
+
+    # 笔记摘要
+    if summary:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": summary}
+        })
+
+    # 频道名 + 视频时长 + 发布时间
+    if channel_name or video_duration or published:
+        fields = []
+        if channel_name:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**频道**\n{channel_name}"}})
+        if video_duration:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**时长**\n{video_duration}"}})
+        if published:
+            fields.append({"is_short": True, "text": {"tag": "lark_md", "content": f"**发布时间**\n{published}"}})
+        elements.append({"tag": "div", "fields": fields})
+
+    elements.append({"tag": "hr"})
+    elements.append({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "📄 查看完整笔记"},
+                "type": "primary",
+                "url": doc_url
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "🔗 查看原视频"},
+                "type": "default",
+                "url": video_url
+            }
+        ]
+    })
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "title": {"tag": "plain_text", "content": "✅ 学习笔记已生成"},
             "template": "green"
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**{video_title}**"}
-            },
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": f"⏱️ 处理时间: {duration}" if duration else "处理完成"}
-            },
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📄 查看飞书文档"},
-                        "type": "primary",
-                        "url": doc_url
-                    }
-                ]
-            }
-        ]
+        "elements": elements
     }
 
 
@@ -174,7 +202,23 @@ def sanitize_filename(title: str, max_len: int = 60) -> str:
     return safe[:max_len].strip()
 
 
-def process_video(video_url: str, video_title: str, callback_token: str, chat_id: str):
+def extract_summary(markdown: str) -> str:
+    """从笔记 markdown 中提取第一段总结文案"""
+    lines = markdown.split('\n')
+    # 跳过标题行和空行，找第一段正文
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('!'):
+            continue
+        # 截取合理长度
+        if len(line) > 200:
+            line = line[:200] + "..."
+        return line
+    return ""
+
+
+def process_video(video_url: str, video_title: str, callback_token: str, chat_id: str,
+                  channel_name: str = "", video_duration: str = "", published: str = ""):
     """完整学习流水线（在后台线程中执行）
 
     1. 生成学习笔记
@@ -194,37 +238,49 @@ def process_video(video_url: str, video_title: str, callback_token: str, chat_id
         output_dir.mkdir(parents=True, exist_ok=True)
         notes_path = output_dir / "output.md"
 
-        # Step 1: 生成学习笔记
-        logger.info("📝 Step 1/4: 生成学习笔记...")
-        from gemini_notes import generate_notes
-        notes_markdown = generate_notes(video_url)
+        # Step 1: 一次 API 调用生成笔记 + 图卡 prompt
+        logger.info("📝 Step 1/3: 生成学习笔记和图卡 prompt...")
+        from gemini_notes import generate_notes_and_card_prompts
+        notes_markdown, card_prompts = generate_notes_and_card_prompts(video_url)
         notes_path.write_text(notes_markdown, encoding='utf-8')
         logger.info(f"   ✅ 笔记已保存: {notes_path}")
 
-        # Step 2: 生成知识图卡
-        logger.info("🎨 Step 2/4: 生成知识图卡...")
-        from gemini_cards import generate_knowledge_cards
-        image_paths = generate_knowledge_cards(video_url, str(output_dir))
-        logger.info(f"   ✅ 生成了 {len(image_paths)} 张图卡")
+        # Step 2: 从 prompt 生成知识图卡图片
+        image_paths = []
+        if card_prompts:
+            logger.info("🎨 Step 2/3: 生成知识图卡图片...")
+            from gemini_cards import generate_cards_from_prompts
+            image_paths = generate_cards_from_prompts(card_prompts, str(output_dir))
+            logger.info(f"   ✅ 生成了 {len(image_paths)} 张图卡")
+        else:
+            logger.warning("   ⚠️ 未获取到图卡 prompt，跳过图卡生成")
 
-        # Step 3: 同步到飞书（知识图卡通过 media-insert 插入，不写入 markdown）
-        logger.info("📄 Step 3/4: 创建飞书文档...")
+        # Step 3: 同步到飞书
+        logger.info("📄 Step 3/3: 创建飞书文档...")
+        summary = extract_summary(notes_markdown)
         from feishu_sync import sync_to_feishu
         doc_url = sync_to_feishu(
             markdown_path=str(notes_path),
             title=video_title,
             video_url=video_url,
             image_paths=image_paths,
-            chat_id=chat_id
+            chat_id=chat_id,
+            summary=summary,
+            channel_name=channel_name,
+            video_duration=video_duration,
+            published=published
         )
 
         if not doc_url:
             raise Exception("飞书文档创建失败")
 
-        # Step 5: 更新原卡片为完成状态
-        duration = str(datetime.now() - start_time).split('.')[0]
-        logger.info(f"✅ Step 4/4: 更新卡片状态 (用时 {duration})")
-        update_card_via_api(callback_token, generate_completed_card(video_title, doc_url, duration))
+        # 更新原卡片为完成状态
+        logger.info("✅ 更新卡片状态")
+        update_card_via_api(callback_token, generate_completed_card(
+            video_title, doc_url, video_url,
+            summary=summary, channel_name=channel_name,
+            video_duration=video_duration, published=published
+        ))
 
         logger.info(f"🎉 处理完成: {video_title} -> {doc_url}")
 
@@ -284,6 +340,9 @@ def handle_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse
         if action_value.get("action") == "start_learning":
             video_url = action_value.get("video_url")
             video_title = action_value.get("video_title", "Unknown Video")
+            channel_name = action_value.get("channel_name", "")
+            video_duration = action_value.get("video_duration", "")
+            published = action_value.get("published", "")
             chat_id = action_value.get("chat_id", FEISHU_CHAT_ID)
 
             if not video_url:
@@ -307,7 +366,8 @@ def handle_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse
             # 启动后台线程
             thread = threading.Thread(
                 target=process_video,
-                args=(video_url, video_title, callback_token, chat_id),
+                args=(video_url, video_title, callback_token, chat_id,
+                      channel_name, video_duration, published),
                 daemon=True
             )
             thread.start()

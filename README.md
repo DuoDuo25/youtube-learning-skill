@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────┐     ┌──────────────┐     ┌──────────────┐
-│  YouTube RSS    │────▶│  飞书通知卡片  │────▶│  用户点击     │
+│  YouTube API    │────▶│  飞书通知卡片  │────▶│  用户点击     │
 │  定时检查更新    │     │  「开始学习」  │     │  「开始学习」  │
 └─────────────────┘     └──────────────┘     └──────┬───────┘
                                                      │
@@ -178,7 +178,7 @@ youtube-learning-skill/
 │   └── output_format.md      # 笔记格式模板
 ├── scripts/
 │   ├── youtube_oauth.py      # YouTube OAuth + 订阅管理
-│   ├── rss_monitor.py        # RSS 监控 + 飞书通知
+│   ├── rss_monitor.py        # 视频监控 + 飞书通知
 │   ├── callback_server.py    # 飞书回调 + 学习流水线编排
 │   ├── gemini_notes.py       # Gemini 笔记生成（streaming + 两步调用）
 │   ├── gemini_cards.py       # Gemini 知识图卡生成（并行 + 重试）
@@ -205,7 +205,7 @@ youtube-learning-skill/
 - **图片生成**：Gemini 3 Pro Image Preview（2K 分辨率，并行生成）
 - **视频信息**：yt-dlp
 - **飞书集成**：lark-cli + lark-oapi SDK（WebSocket 长连接）
-- **RSS 解析**：YouTube Atom Feed
+- **视频监控**：YouTube Data API v3（playlistItems）
 
 ## 常见问题
 

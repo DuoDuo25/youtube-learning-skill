@@ -224,6 +224,8 @@ youtube-learning-skill/
 
 [点击加入飞书群「嗨妮好 · 学习笔记站」](https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=4d7q8aa5-bcfe-4d27-8b9a-d88943da3396)
 
+<img src="assets/feishu-group-qrcode.png" width="300" alt="扫码加入飞书群">
+
 ## License
 
 MIT
